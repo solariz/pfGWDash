@@ -1,3 +1,26 @@
+"""
+pfSense Gateway Status Monitor (pfGWDash)
+
+This script polls multiple pfSense instances, retrieves gateway status information,
+and generates a dynamic HTML status page. It supports both single execution and
+daemon mode for continuous monitoring.
+
+For configuration, see the README.md file and config.ini.sample.
+
+Author: Marco G.
+GitHub: https://github.com/solariz/pfGWDash
+License: MIT
+
+Usage:
+    Single execution: python pfgw.py
+    Loop mode: python pfgw.py --daemon
+
+The whole thing was coded on an event, so be gentle in your judgement,
+if you find any bugs or have improvements, feel free to pull and commit
+and commit it back.
+
+thanks
+"""
 import requests
 from bs4 import BeautifulSoup
 import urllib3
@@ -29,6 +52,17 @@ config.read('config.ini')
 
 
 def generate_html(all_gateways, polling_times, config):
+    """
+    Generate HTML content using the gateway data and polling times.
+
+    Args:
+        all_gateways (dict): Dictionary containing gateway data for all pfSense instances.
+        polling_times (dict): Dictionary containing polling times for each pfSense instance.
+        config (ConfigParser): Configuration object.
+
+    Returns:
+        None
+    """
     env = Environment(loader=FileSystemLoader('.'))
     template = env.get_template('gateway_template.html')
 
@@ -60,6 +94,16 @@ def generate_html(all_gateways, polling_times, config):
 
 
 def get_status_color(status, loss):
+    """
+    Determine the status color, symbol, and order based on the gateway status and packet loss.
+
+    Args:
+        status (str): The status of the gateway.
+        loss (str): The packet loss percentage.
+
+    Returns:
+        tuple: A tuple containing the color class, status symbol, and status order.
+    """
     status_lower = status.lower()
     if 'offline' in status_lower:
         return 'table-danger', '❌', 2
@@ -69,10 +113,13 @@ def get_status_color(status, loss):
         return 'table-success', '✅', 0
 
 
-
-
-
 def load_auth_data():
+    """
+    Load authentication data (cookie, sessid) from the auth file defined in config
+
+    Returns:
+        dict: A dictionary containing the loaded authentication data.
+    """
     auth_file = config['Session']['auth_file']
     if os.path.exists(auth_file):
         with open(auth_file, 'r') as f:
@@ -84,6 +131,15 @@ def load_auth_data():
     return {}
 
 def save_auth_data(auth_data):
+    """
+    Save authentication data (cookie, sessid) to the auth file.
+
+    Args:
+        auth_data (dict): The authentication data to be saved.
+
+    Returns:
+        None
+    """
     auth_file = config['Session']['auth_file']
     serializable_data = {}
     for pfsense, auth_info in auth_data.items():
@@ -94,6 +150,16 @@ def save_auth_data(auth_data):
         json.dump(serializable_data, f)
 
 def get_csrf_token(session, url):
+    """
+    Retrieve the CSRF token from the given URL.
+
+    Args:
+        session (requests.Session): The session object to use for the request.
+        url (str): The URL to retrieve the CSRF token from.
+
+    Returns:
+        str or None: The CSRF token if found, None otherwise.
+    """
     response = session.get(url, verify=False)
     csrf_match = re.search(r'sid:([^"]+)', response.text)
     if csrf_match:
@@ -102,6 +168,15 @@ def get_csrf_token(session, url):
 
 
 def login_pfsense(pfsense_config):
+    """
+    Authenticate with a pfSense instance.
+
+    Args:
+        pfsense_config (dict): Configuration for the pfSense instance.
+
+    Returns:
+        requests.Session or None: An authenticated session if successful, None otherwise.
+    """
     url = pfsense_config['url']
     username = pfsense_config['username']
     password = pfsense_config['password']
@@ -156,6 +231,16 @@ def login_pfsense(pfsense_config):
         return None
 
 def get_gateway_status(session, pfsense_config):
+    """
+    Retrieve gateway status from a pfSense using the pfsense integrated gateway.widget.php
+
+    Args:
+        session (requests.Session): An authenticated session.
+        pfsense_config (dict): Configuration for the pfSense instance.
+
+    Returns:
+        str or None: HTML content of the gateway status if successful, None otherwise.
+    """
     url = pfsense_config['url']
     gateway_url = f"{url}/widgets/widgets/gateways.widget.php"
     print(f"Fetching gateway status from {gateway_url}")
@@ -188,6 +273,19 @@ def get_gateway_status(session, pfsense_config):
     return response.text if response.status_code == 200 else None
 
 def parse_gateway_status(html_content):
+    """
+    Parse the HTML content of the pfsense gateway.widget and
+    extract gateway status information. We are intentionally
+    not extracting the IP of the Gateways due we do not want
+    to display it on the dashboard to avoid leaking of the
+    public IP.
+
+    Args:
+        html_content (str): HTML content of the gateway status page.
+
+    Returns:
+        list: A list of dictionaries containing parsed gateway information.
+    """
     soup = BeautifulSoup(html_content, 'html.parser')
     gateways = []
     rows = soup.find_all('tr')
@@ -216,10 +314,28 @@ def parse_gateway_status(html_content):
 
 
 def log_message(message):
+    """
+    Log a message with a timestamp.
+
+    Args:
+        message (str): The message to be logged.
+
+    Returns:
+        None
+    """
     timestamp = datetime.now().strftime("%H:%M:%S")
     print(f"[{timestamp}] {message}")
 
 def main(daemon_mode=False):
+    """
+    Main function to poll pfSense instances and generate the status page.
+
+    Args:
+        daemon_mode (bool): Whether to run in daemon mode (continuous polling).
+
+    Returns:
+        None
+    """
     poll_interval = int(config['General'].get('poll_every', 30))
 
     if daemon_mode:

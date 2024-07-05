@@ -84,19 +84,31 @@
             dataTable.destroy();
         }
         initializeDataTable();
+        dataTable.order([2, 'asc']).draw(); // Re-apply custom sorting
         applyCustomStyling();
+    }
+
+    function statusSortingFunction(data) {
+        return data === '✅' ? 1 : 0;
     }
 
     function initializeDataTable() {
         dataTable = $('#gatewayTable').DataTable({
             "order": [],
-            "pageLength": 25,
-            "lengthMenu": [[10, 25, 50, -1], [10, 25, 50, "All"]],
+            "pageLength": 15,
+            "lengthMenu": [[10, 15, 40, -1], [10, 15, 40, "All"]],
             "columnDefs": [
                 {
-                    "targets": 1,
-                    "type": "html",
-                    "orderable": true
+                    "targets": 2, // Assuming the Status column is the third column (index 2)
+                    "orderable": false,
+                    "type": "status",
+                    "render": function(data, type, row) {
+                        if (type === 'sort') {
+                            return statusSortingFunction(data);
+                        }
+                        return data;
+                    },
+                    "className": "status-column" // Add this line
                 }
             ],
             "stateSave": true,
@@ -106,9 +118,23 @@
             },
             "stateLoadCallback": function(settings) {
                 return JSON.parse(localStorage.getItem('DataTables_' + settings.sInstance));
+            },
+            "rowGroup": {
+                dataSrc: function(row) {
+                    return row[2] !== '✅' ? 'Critical' : 'Normal'; // Group by status
+                },
+                startRender: null // Don't render group headers
+            },
+            "orderFixed": [
+                [2, 'asc'] // Always sort by status first
+            ],
+            "drawCallback": function(settings) {
+                // Remove sort indicators from the Status column
+                $('.status-column').removeClass('sorting sorting_asc sorting_desc');
             }
         });
     }
+
 
     function initializeScripts() {
         initializeDataTable();

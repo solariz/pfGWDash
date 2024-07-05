@@ -81,6 +81,10 @@
             border-color: var(--primary-color);
         }
 
+        .status-column::after {
+            display: none !important;
+        }
+
         @media (max-width: 767px) {
             body {
                 font-size: 14px;
@@ -150,6 +154,8 @@
             </table>
         </div>
         <p class="text-center mt-4">Last updated: {{ current_time }}</p>
+        <p class="text-center mt-4">(Rows with Warning / Alert are always displayed first no matter of sorting.)</p>
+        <hr>
         <div class="mt-4">
             <h5>Polling Times:</h5>
             <table class="table table-sm table-bordered">
