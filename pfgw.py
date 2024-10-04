@@ -292,8 +292,7 @@ def parse_gateway_status(html_content):
     for row in rows:
         cols = row.find_all('td')
         if len(cols) >= 6:
-            name_col = cols[1].text.strip().split('\n')
-            name = name_col[0].strip().split('.')[0]  # Remove IP from name
+            name = list(cols[1].descendants)[0].string
             loss = cols[4].text.strip()
             status = cols[5].text.strip()
             color_class, status_symbol, status_order = get_status_color(status, loss)
