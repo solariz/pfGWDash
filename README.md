@@ -6,6 +6,7 @@ small script to accumlulate data from different pfsense boxes and display as a g
 
 This project provides a solution for monitoring the status of gateways across multiple pfSense instances. It polls pfSense devices, retrieves gateway information, and generates a dynamic HTML status page.
 
+
 ## Features
 
 - Monitor multiple pfSense instances
@@ -14,6 +15,22 @@ This project provides a solution for monitoring the status of gateways across mu
 - Automatic page refresh via JavaScript
 - Visual indicators for gateway status and data freshness
 - Daemon mode for continuous polling
+
+
+
+# pfSense Interface Bandwidth Monitor
+
+2nd Part of the project is pfbw.py which reuse the same auth to read current bandwidth from config specified interfaces and output it as graphs. I wouldnt go to crazy with the refresh / pull time, 10s should be fine. Basically it is same requests as done by the original pfsense dashboard Traffic Graph.
+
+
+## Features
+
+- Monitor multiple pfSense instances
+- Generate a responsive HTML status page
+- Automatic page refresh via JavaScript
+- Daemon mode for continuous polling
+
+
 
 ## Requirements
 
@@ -59,6 +76,8 @@ To run the script once:
 
 ```
 python pfgw.py
+python pfbw.py
+
 ```
 
 ### Daemon Mode
@@ -67,6 +86,7 @@ To run the script in daemon mode, continuously polling at the interval specified
 
 ```
 python pfgw.py --daemon
+python pfbw.py --daemon
 ```
 
 ## Output

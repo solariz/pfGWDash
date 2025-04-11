@@ -4,7 +4,7 @@ After=network.target
 
 [Service]
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/usr/bin/python3 -u /opt/pfGWDash/pfgw.py --daemon
+ExecStart=/usr/bin/python3 -u /opt/pfGWDash/pfbw.py --daemon
 WorkingDirectory=/opt/pfGWDash
 User=root
 Group=root

@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!-- Actual Refresh is done by AJAX but for safety, we refresh every 5 Minutes if stuck -->
+    <meta http-equiv="refresh" content="300">
+    <title>Network Bandwidth Monitor</title>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap">
+    <link rel="stylesheet" href="pfbw.css">
+</head>
+<body>
+    <div class="dashboard-header">
+        <div>
+            <h1 class="dashboard-title">Network Bandwidth Monitor</h1>
+        </div>
+        <button class="theme-toggle" id="theme-toggle" aria-label="Toggle dark mode">
+            <span class="sun">☀️</span>
+            <span class="moon">🌙</span>
+        </button>
+    </div>
+
+    {% set max_total_bw = 0 %}
+    {% set active_firewall = '' %}
+    {% set fw_number = 1 %}  {# Initialize fw_number #}
+    
+    {% for pfsense_name, bandwidth_data in all_bandwidth.items() %}
+        {% set total_bw = 0 %}
+        {% for interface_id, data in bandwidth_data.items() %}
+            {% if data.status is defined and data.status == 'ok' %}
+                {% set total_bw = total_bw + data.in + data.out %}
+            {% endif %}
+        {% endfor %}
+        
+        {% if total_bw > max_total_bw %}
+            {% set max_total_bw = total_bw %}
+            {% set active_firewall = pfsense_name %}
+            {% set fw_number = loop.index %}
+        {% endif %}
+    {% endfor %}
+    
+    {% if active_firewall == '' and all_bandwidth|length > 0 %}
+        {% set active_firewall = all_bandwidth.keys()|list|first %}
+    {% endif %}
+    
+    {% if active_firewall != '' %}
+        {% set polling_time = polling_times.get(active_firewall, 'N/A') %}
+        
+        {% set bandwidth_data = all_bandwidth.get(active_firewall, {}) %}
+        
+        <div class="interfaces-grid">
+            {% if not bandwidth_data %}
+                <div class="no-data-message">No bandwidth data available yet. Waiting for next poll...</div>
+            {% else %}
+                {# Iterate through interfaces in the order specified in config #}
+                {% for interface_id in ordered_interfaces %}
+                    {# Get this interface from the active firewall's data (if it exists) #}
+                    {% if interface_id in bandwidth_data %}
+                        {% set data = bandwidth_data[interface_id] %}
+                        <div class="interface-card" data-interface="{{ data.display_name }}">
+                            <div class="interface-name">{{ data.display_name }}</div>
+                            <span class="firewall-tag" data-fw="{{ fw_number }}">FW{{ fw_number }}</span>
+                            
+                            {% if data.status is defined and data.status != 'ok' %}
+                                {# --- Status Display --- #}
+                                <div class="bandwidth-item">
+                                    <div class="bandwidth-label">
+                                        <span class="bandwidth-direction">Status</span>
+                                    </div>
+                                    <span class="interface-status status-waiting">
+                                        {% if data.status == 'new_interface' %}
+                                            New interface detected
+                                        {% elif data.status == 'incomplete_data' or data.status == 'invalid_format' %}
+                                            Waiting for data...
+                                        {% elif data.status == 'invalid_time' %}
+                                            Clock sync issue?
+                                        {% elif data.status == 'missing_values' %}
+                                            Missing counters
+                                         {% elif data.status == 'error' %}
+                                            Calculation error
+                                        {% else %}
+                                            {{ data.status }} {# Fallback for other statuses #}
+                                        {% endif %}
+                                    </span>
+                                </div>
+                            {% else %}
+                                {# --- Define variables for current interface using latest history --- #}
+                                {% set display_name = data.display_name %}
+                                {% set current_bw = latest_bandwidth.get(display_name, {'in': 0, 'out': 0}) %}
+
+                                {# --- Incoming Bandwidth --- #}
+                                <div class="bandwidth-item" data-metric="in">
+                                    <div class="bandwidth-label">
+                                        <span class="bandwidth-direction">In</span>
+                                        <span class="bandwidth-value">{{ "%.2f"|format(current_bw.in) }} Mbps</span>
+                                    </div>
+                                    <div class="bandwidth-bar-container">
+                                        {% set max_in = max_bandwidth.get(display_name + '-in', 1) %}
+                                        {% set in_percentage = (current_bw.in / max_in * 100) if max_in > 0 else 0 %}
+                                        <div class="bandwidth-bar incoming-bar" 
+                                             data-value="{{ current_bw.in }}"
+                                             data-interface="{{ display_name }}-in"
+                                             data-max="{{ max_in }}"
+                                             style="width: {{ '%.1f'|format(in_percentage) }}%; background-color: {{ 'var(--inactive-color)' if current_bw.in < 0.005 else '' }}">
+                                        </div>
+                                    </div>
+                                </div>
+                                
+                                {# --- Outgoing Bandwidth --- #}
+                                <div class="bandwidth-item" data-metric="out">
+                                    <div class="bandwidth-label">
+                                        <span class="bandwidth-direction">Out</span>
+                                        <span class="bandwidth-value">{{ "%.2f"|format(current_bw.out) }} Mbps</span>
+                                    </div>
+                                    <div class="bandwidth-bar-container">
+                                        {% set max_out = max_bandwidth.get(display_name + '-out', 1) %}
+                                        {% set out_percentage = (current_bw.out / max_out * 100) if max_out > 0 else 0 %}
+                                        <div class="bandwidth-bar outgoing-bar"
+                                             data-value="{{ current_bw.out }}"
+                                             data-interface="{{ display_name }}-out"
+                                             data-max="{{ max_out }}"
+                                             style="width: {{ '%.1f'|format(out_percentage) }}%; background-color: {{ 'var(--inactive-color)' if current_bw.out < 0.005 else '' }}">
+                                        </div>
+                                    </div>
+                                </div>
+                                
+                                {# --- History Section --- #}
+                                <div class="history-toggle" data-interface="{{ display_name }}">
+                                    Show 5-min history
+                                </div>
+                                <div class="history-section" id="history-{{ display_name }}">
+                                    <div class="history-container">
+                                        <canvas class="history-chart" id="chart-{{ display_name }}"></canvas>
+                                    </div>
+                                </div>
+                            {% endif %}
+                        </div>
+                    {% endif %}
+                {% endfor %}
+            {% endif %}
+        </div>
+        
+        <!-- Alert for stale data -->
+        <div id="stale-data-overlay"></div>
+        <div id="stale-data-alert">
+            Warning: Data is potentially outdated. Last successful update was over a minute ago.
+        </div>
+        
+        <!-- Footer -->
+        <div class="dashboard-footer">
+            <div class="footer-polling-info">
+                <span class="footer-polling-time">Last polled: {{ polling_time }} seconds</span>
+                <span class="footer-last-update" id="last-update-time">Last updated: --:--:--</span>
+            </div>
+            
+            <!-- Add a single global legend for all charts -->
+            <div class="footer-chart-legend">
+                <div class="legend-item legend-in">
+                    <div class="legend-color"></div>
+                    <div>In</div>
+                </div>
+                <div class="legend-item legend-out">
+                    <div class="legend-color"></div>
+                    <div>Out</div>
+                </div>
+            </div>
+            
+            <!-- The live update status dot will be added here by JS -->
+        </div>
+    {% else %}
+        <div class="no-data-message">No firewalls detected. Please check your configuration.</div>
+    {% endif %}
+    
+    <!-- Expose data through data attributes instead of inline JS -->
+    <div id="dashboard-data" 
+         data-poll-interval="{{ poll_interval }}" 
+         data-bandwidth-history='{{ bandwidth_history|tojson }}'
+         data-debug="{{ debug_enabled|lower }}"
+         style="display:none;">
+    </div>
+    <script>
+        // Dark mode functionality
+        function initTheme() {
+            const savedTheme = localStorage.getItem('theme') || 'light';
+            document.documentElement.setAttribute('data-theme', savedTheme);
+        }
+        
+        function toggleTheme() {
+            const currentTheme = document.documentElement.getAttribute('data-theme');
+            const newTheme = currentTheme === 'light' ? 'dark' : 'light';
+            document.documentElement.setAttribute('data-theme', newTheme);
+            localStorage.setItem('theme', newTheme);
+            
+            // Redraw charts if they exist
+            if (typeof drawHistoryCharts === 'function') {
+                setTimeout(drawHistoryCharts, 300);
+            }
+        }
+        
+        // Initialize theme on page load
+        initTheme();
+        
+        // Add event listener to theme toggle button
+        document.getElementById('theme-toggle').addEventListener('click', toggleTheme);
+        
+        // Define global variables from data attributes
+        const dataElement = document.getElementById('dashboard-data');
+        const pollIntervalSeconds = parseInt(dataElement.getAttribute('data-poll-interval') || '10', 10);
+        
+        let initialBandwidthHistory = {};
+        try {
+            // Get history data from data attribute
+            const historyStr = dataElement.getAttribute('data-bandwidth-history');
+            if (historyStr) {
+                // Parse the JSON string directly - no need for extra sanitization
+                initialBandwidthHistory = JSON.parse(historyStr);
+                console.log("Initial bandwidth history loaded successfully");
+                console.log("Initial data structure:", initialBandwidthHistory);
+            } else {
+                console.log("No initial bandwidth history found");
+                // Initialize with a default structure if no data provided
+                initialBandwidthHistory = {
+                    timestamp: Math.floor(Date.now() / 1000),
+                    interval: pollIntervalSeconds,
+                    interfaces: {}
+                };
+            }
+
+            // Debug initial bandwidth values
+            document.querySelectorAll('.interface-card').forEach(card => {
+                const displayName = card.dataset.interface;
+                const inBar = card.querySelector('.incoming-bar');
+                const outBar = card.querySelector('.outgoing-bar');
+                
+                console.log(`Initial values for ${displayName}:`, {
+                    inValue: inBar?.dataset.value,
+                    inWidth: inBar?.style.width,
+                    outValue: outBar?.dataset.value,
+                    outWidth: outBar?.style.width,
+                    maxIn: inBar?.dataset.max,
+                    maxOut: outBar?.dataset.max
+                });
+            });
+        } catch (e) {
+            console.error("Failed to parse bandwidth history:", e);
+            console.error("Raw history data:", dataElement.getAttribute('data-bandwidth-history'));
+            
+            // Initialize with a default structure if parsing fails
+            initialBandwidthHistory = {
+                timestamp: Math.floor(Date.now() / 1000),
+                interval: pollIntervalSeconds,
+                interfaces: {}
+            };
+        }
+
+        // Debug the max bandwidth data
+        const maxBandwidthData = {};
+        document.querySelectorAll('.bandwidth-bar').forEach(bar => {
+            const interfaceName = bar.dataset.interface;
+            const maxValue = bar.dataset.max;
+            if (interfaceName && maxValue) {
+                maxBandwidthData[interfaceName] = parseFloat(maxValue);
+            }
+        });
+        console.log("Initial max bandwidth values:", maxBandwidthData);
+    </script>
+    <script src="pfbw.js" defer></script> 
+</body>
+</html> 
