@@ -170,6 +170,11 @@ def parse_gateway_status(html_content):
             name = list(cols[1].descendants)[0].string
             loss = cols[4].text.strip()
             status = cols[5].text.strip()
+
+            # Skip gateways with "Pending" status
+            if status.lower() == 'pending':
+                continue
+
             color_class, status_symbol, status_order = get_status_color(status, loss)
             gateway = {
                 'name': name,
@@ -229,6 +234,17 @@ def main(daemon_mode=False):
             else:
                 all_gateways[pfsense_config['name']] = gateways
                 log_message(f"Successfully retrieved {len(gateways)} gateways for {pfsense_config['name']}")
+                # Check for high packet loss and print to CLI
+                for gw in gateways:
+                    # Skip if loss is 'Pending' before attempting conversion
+                    if gw['loss'].lower() == 'pending':
+                        continue
+                    try:
+                        loss_value = float(gw['loss'].strip('%'))
+                        if loss_value > 1.0:
+                            log_message(f"{pfsense_config['name']}, {gw['name']}, {gw['loss']}")
+                    except ValueError:
+                        log_message(f"Warning: Could not parse loss value '{gw['loss']}' for gateway '{gw['name']}' on {pfsense_config['name']}")
 
             end_time = time.time()
             polling_times[pfsense_config['name']] = round(end_time - start_time, 2)

@@ -382,7 +382,7 @@ def get_interface_bandwidth(session, pfsense_config):
 
 
 def calculate_bandwidth(current_data, pfsense_name):
-    """Calculate bandwidth based on current and previous data."""
+    """Calculate bandwidth based on current and previous data, handling counter rollovers."""
     global previous_data, max_bandwidth
     
     bandwidth_results = {}
@@ -446,6 +446,10 @@ def calculate_bandwidth(current_data, pfsense_name):
                 bandwidth_results[interface_name]['status'] = 'invalid_time'
                 continue
             
+            # Assume 64-bit counters for rollover calculation
+            COUNTER_MAX = 2**64 
+            MAX_REASONABLE_MBPS = 20000 # 20 Gbps sanity check
+
             current_in = interface_data[0]['values'][1]
             prev_in = prev_data[interface_name][0]['values'][1]
             
@@ -453,9 +457,20 @@ def calculate_bandwidth(current_data, pfsense_name):
                 log_message(f"Missing in-bandwidth values for {interface_name}, skipping calculation")
                 bandwidth_results[interface_name]['status'] = 'missing_values'
                 continue
+
+            # Handle counter rollover for incoming bytes
+            if current_in < prev_in:
+                log_message(f"Detected counter rollover for IN traffic on {interface_name} (prev: {prev_in}, curr: {current_in})", level="DEBUG")
+                bytes_diff_in = (COUNTER_MAX - prev_in) + current_in
+            else:
+                bytes_diff_in = current_in - prev_in
                 
-            bytes_diff_in = current_in - prev_in
             megabits_in = (bytes_diff_in * 8) / (time_diff * 1000000)
+            
+            # Sanity check for incoming bandwidth
+            if megabits_in > MAX_REASONABLE_MBPS:
+                 log_message(f"Warning: Implausibly high incoming bandwidth calculated for {interface_name}: {megabits_in:.2f} Mbps", level="WARNING")
+
             bandwidth_results[interface_name]['in'] = megabits_in
             
             current_out = interface_data[1]['values'][1]
@@ -465,9 +480,20 @@ def calculate_bandwidth(current_data, pfsense_name):
                 log_message(f"Missing out-bandwidth values for {interface_name}, skipping calculation")
                 bandwidth_results[interface_name]['status'] = 'missing_values'
                 continue
+
+            # Handle counter rollover for outgoing bytes
+            if current_out < prev_out:
+                log_message(f"Detected counter rollover for OUT traffic on {interface_name} (prev: {prev_out}, curr: {current_out})", level="DEBUG")
+                bytes_diff_out = (COUNTER_MAX - prev_out) + current_out
+            else:
+                bytes_diff_out = current_out - prev_out
                 
-            bytes_diff_out = current_out - prev_out
             megabits_out = (bytes_diff_out * 8) / (time_diff * 1000000)
+
+            # Sanity check for outgoing bandwidth
+            if megabits_out > MAX_REASONABLE_MBPS:
+                 log_message(f"Warning: Implausibly high outgoing bandwidth calculated for {interface_name}: {megabits_out:.2f} Mbps", level="WARNING")
+
             bandwidth_results[interface_name]['out'] = megabits_out
             bandwidth_results[interface_name]['status'] = 'ok'
             
