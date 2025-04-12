@@ -144,15 +144,17 @@ def login_pfsense(pfsense_config):
         return None
 
 
-def log_message(message):
+def log_message(message, level="INFO"):
     """
-    Log a message with a timestamp.
+    Log a message with a timestamp and level.
 
     Args:
         message (str): The message to be logged.
+        level (str, optional): The log level (e.g., "INFO", "WARNING", "ERROR").
+                               Defaults to "INFO".
 
     Returns:
         None
     """
     timestamp = datetime.now().strftime("%H:%M:%S")
-    print(f"[{timestamp}] {message}") 
+    print(f"[{timestamp}] [{level}] {message}") 

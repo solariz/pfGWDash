@@ -58,6 +58,10 @@ polling_times = {}
 INTERFACE_REFRESH_INTERVAL = 300
 HISTORY_RETENTION_PERIOD = 300
 
+# Additions for manual max bandwidth
+manual_max_bandwidth = {}
+min_dynamic_maxbw = 1000 # Default value, will be overwritten by config
+
 
 def load_stored_data():
     """Load persistent data (raw counters, names, max rates) from a single JSON file."""
@@ -103,6 +107,30 @@ def save_stored_data(raw_bandwidth_data, interface_names, interface_names_last_u
         log_message(f"Saved persistent data to {DATA_STORE_FILE}")
     except Exception as e:
         log_message(f"Error saving persistent data: {e}")
+
+
+def load_manual_max_bandwidth():
+    """Load manual max bandwidth settings from the config file."""
+    global manual_max_bandwidth, min_dynamic_maxbw
+    
+    manual_max_bandwidth = {} # Reset just in case
+    min_dynamic_maxbw = 1000 # Reset to default
+
+    if 'BandwidthMax' in config:
+        bandwidth_max_config = config['BandwidthMax']
+        min_dynamic_maxbw = bandwidth_max_config.getint('min_maxbw', 1000) 
+        log_message(f"Minimum dynamic max bandwidth set to: {min_dynamic_maxbw} Mbps")
+        
+        for key, value in bandwidth_max_config.items():
+            if key != 'min_maxbw':
+                try:
+                    # Use the key directly from config (should be raw interface ID, e.g., 'opt1')
+                    manual_max_bandwidth[key] = int(value)
+                    log_message(f"Manual max bandwidth for interface ID {key}: {value} Mbps")
+                except ValueError:
+                    log_message(f"Warning: Invalid manual max bandwidth value '{value}' for {key} in config.ini. Skipping.", level="WARNING")
+    else:
+        log_message("No [BandwidthMax] section found in config.ini. Using defaults.", level="WARNING")
 
 
 def load_bandwidth_history():
@@ -383,7 +411,7 @@ def get_interface_bandwidth(session, pfsense_config):
 
 def calculate_bandwidth(current_data, pfsense_name):
     """Calculate bandwidth based on current and previous data, handling counter rollovers."""
-    global previous_data, max_bandwidth
+    global previous_data, max_bandwidth, manual_max_bandwidth, min_dynamic_maxbw
     
     bandwidth_results = {}
     
@@ -498,16 +526,32 @@ def calculate_bandwidth(current_data, pfsense_name):
             bandwidth_results[interface_name]['status'] = 'ok'
             
             interface_display_name = get_display_name(interface_name)
+            
+            # Check if there is a manual override for this interface ID (e.g., 'opt1')
+            manual_override = interface_name in manual_max_bandwidth # Check using the raw interface_name
+            
             in_key = f"{interface_display_name}-in"
             out_key = f"{interface_display_name}-out"
             
-            if in_key not in max_bandwidth or megabits_in > max_bandwidth[in_key]:
-                max_bandwidth[in_key] = megabits_in
-                log_message(f"New max incoming bandwidth for {interface_display_name}: {megabits_in:.2f} Mbps")
-            
-            if out_key not in max_bandwidth or megabits_out > max_bandwidth[out_key]:
-                max_bandwidth[out_key] = megabits_out
-                log_message(f"New max outgoing bandwidth for {interface_display_name}: {megabits_out:.2f} Mbps")
+            # Update dynamic max bandwidth only if no manual override exists
+            if not manual_override:
+                # Ensure the key exists and is at least min_dynamic_maxbw
+                if in_key not in max_bandwidth or max_bandwidth[in_key] < min_dynamic_maxbw:
+                    max_bandwidth[in_key] = min_dynamic_maxbw
+                
+                # Update if the new value is higher
+                if megabits_in > max_bandwidth[in_key]:
+                    max_bandwidth[in_key] = megabits_in
+                    log_message(f"New dynamic max incoming bandwidth for {interface_display_name}: {megabits_in:.2f} Mbps")
+                
+                # Ensure the key exists and is at least min_dynamic_maxbw
+                if out_key not in max_bandwidth or max_bandwidth[out_key] < min_dynamic_maxbw:
+                    max_bandwidth[out_key] = min_dynamic_maxbw
+
+                # Update if the new value is higher
+                if megabits_out > max_bandwidth[out_key]:
+                    max_bandwidth[out_key] = megabits_out
+                    log_message(f"New dynamic max outgoing bandwidth for {interface_display_name}: {megabits_out:.2f} Mbps")
             
             log_message(f"Calculated bandwidth for {bandwidth_results[interface_name]['display_name']} ({interface_name}): IN={megabits_in:.2f} Mbps, OUT={megabits_out:.2f} Mbps")
         except Exception as e:
@@ -531,7 +575,7 @@ def get_display_name(interface_id):
 
 def generate_html(all_calculated_bw_this_cycle, polling_times):
     """Generate HTML content using the latest history data and polling times."""
-    global max_bandwidth
+    global max_bandwidth, manual_max_bandwidth, min_dynamic_maxbw
     
     env = Environment(loader=FileSystemLoader('.'))
     template = env.get_template('bandwidth_template.html')
@@ -539,68 +583,104 @@ def generate_html(all_calculated_bw_this_cycle, polling_times):
     poll_bw_interval = int(config['Bandwidth'].get('poll_every', 30))
     debug_enabled = config['General'].get('debug', 'False').lower() == 'true'
     
-    # Get the ordered list of interfaces from config
-    ordered_interfaces = [iface.strip() for iface in config['Bandwidth']['interfaces'].split(',')]
+    # Get the ordered list of interfaces *IDs* from config
+    ordered_interface_ids = [iface.strip() for iface in config['Bandwidth']['interfaces'].split(',')]
     
     # Load the complete history
     bandwidth_history = load_bandwidth_history()
     bandwidth_history["current_time"] = int(time.time())
 
-    # Prepare the latest bandwidth data from history for direct display
-    latest_bandwidth_from_history = {}
-    if "interfaces" in bandwidth_history:
-        for display_name, history in bandwidth_history["interfaces"].items():
-            latest_in = history["in"][0][1] if history.get("in") else 0
-            latest_out = history["out"][0][1] if history.get("out") else 0
-            latest_timestamp = 0
-            if history.get("in"):
-                latest_timestamp = max(latest_timestamp, history["in"][0][0])
-            if history.get("out"):
-                latest_timestamp = max(latest_timestamp, history["out"][0][0])
-                
-            latest_bandwidth_from_history[display_name] = {
-                'in': latest_in,
-                'out': latest_out,
-                'timestamp': latest_timestamp # Add timestamp if needed by template
-            }
-    
-    # Get a mapping of interface IDs to their display names for ordering
+    # Get a mapping of interface IDs to their display names
     interface_id_to_display = {}
+    all_display_names = set() # Track all display names seen
     for firewall_data in all_calculated_bw_this_cycle.values():
         for interface_id, data in firewall_data.items():
             if 'display_name' in data:
-                interface_id_to_display[interface_id] = data['display_name']
-    
-    # Note: The template 'bandwidth_template.html' will need modification.
-    # It should iterate using 'all_calculated_bw_this_cycle' to get firewall/interface structure,
-    # but use 'latest_bandwidth_from_history[data.display_name]' to get the 'in' and 'out' values for display.
+                display_name = data['display_name']
+                interface_id_to_display[interface_id] = display_name
+                all_display_names.add(display_name)
+
+    # Determine the display names of the interfaces *currently* in the config
+    allowed_display_names = set(get_display_name(if_id) for if_id in ordered_interface_ids)
+
+    # Filter latest bandwidth data from history to include only allowed interfaces
+    filtered_latest_bandwidth = {}
+    if "interfaces" in bandwidth_history:
+        for display_name, history in bandwidth_history["interfaces"].items():
+            if display_name in allowed_display_names:
+                latest_in = history["in"][0][1] if history.get("in") else 0
+                latest_out = history["out"][0][1] if history.get("out") else 0
+                latest_timestamp = 0
+                if history.get("in"):
+                    latest_timestamp = max(latest_timestamp, history["in"][0][0])
+                if history.get("out"):
+                    latest_timestamp = max(latest_timestamp, history["out"][0][0])
+                
+                filtered_latest_bandwidth[display_name] = {
+                    'in': latest_in,
+                    'out': latest_out,
+                    'timestamp': latest_timestamp 
+                }
+
+    # Filter the complete bandwidth history to include only allowed interfaces
+    if "interfaces" in bandwidth_history:
+        bandwidth_history["interfaces"] = {
+            name: data for name, data in bandwidth_history["interfaces"].items()
+            if name in allowed_display_names
+        }
+
+    # Build effective max bandwidth, considering only allowed interfaces
+    effective_max_bandwidth = {} 
+    for interface_id in ordered_interface_ids:
+        display_name = get_display_name(interface_id)
+        if display_name: # Ensure we have a display name
+            in_key = f"{display_name}-in"
+            out_key = f"{display_name}-out"
+            
+            # Check for manual override using the raw interface_id
+            if interface_id in manual_max_bandwidth:
+                manual_val = manual_max_bandwidth[interface_id]
+                effective_max_bandwidth[in_key] = manual_val
+                effective_max_bandwidth[out_key] = manual_val
+                log_message(f"Using manual max bandwidth {manual_val} Mbps for {display_name} ({interface_id})", level="DEBUG")
+            else:
+                # Use dynamic value (or default)
+                dynamic_in = max_bandwidth.get(in_key, min_dynamic_maxbw)
+                dynamic_out = max_bandwidth.get(out_key, min_dynamic_maxbw)
+                effective_max_bandwidth[in_key] = dynamic_in
+                effective_max_bandwidth[out_key] = dynamic_out
+                log_message(f"Using dynamic max bandwidth IN={dynamic_in:.2f}, OUT={dynamic_out:.2f} Mbps for {display_name} ({interface_id})", level="DEBUG")
+
+    # Pass the filtered data to the template
+    # Note: Pass the *original* ordered_interface_ids to maintain config order in the template
     html_content = template.render(
-        all_bandwidth=all_calculated_bw_this_cycle, # Still useful for structure and status
-        latest_bandwidth=latest_bandwidth_from_history, # Use this for current values
+        all_bandwidth=all_calculated_bw_this_cycle, 
+        latest_bandwidth=filtered_latest_bandwidth, # Use filtered data
         polling_times=polling_times,
         current_time=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         poll_interval=poll_bw_interval,
-        max_bandwidth=max_bandwidth,
-        bandwidth_history=bandwidth_history, # Full history for graphs
-        debug_enabled=debug_enabled, # Pass debug setting to template
-        ordered_interfaces=ordered_interfaces, # Pass ordered interface list
-        interface_id_to_display=interface_id_to_display # Pass mapping of IDs to display names
+        max_bandwidth=effective_max_bandwidth, # Use filtered data but pass as max_bandwidth for template compatibility
+        bandwidth_history=bandwidth_history, # Use filtered history
+        debug_enabled=debug_enabled, 
+        ordered_interfaces=ordered_interface_ids, # Use IDs from config for ordering
+        interface_id_to_display=interface_id_to_display # Still need the full mapping
     )
     
-    output_path = config['General']['html_output_bw']
-    with open(output_path, 'w') as f:
+    with open(html_output_path, 'w') as f:
         f.write(html_content)
         
-    log_message(f"HTML bandwidth output generated: {output_path}")
+    log_message(f"HTML bandwidth output generated: {html_output_path}")
 
 
 def main(daemon_mode=False):
     """Main function to poll pfSense instances and generate the bandwidth status page."""
     global previous_data, interface_names, interface_names_last_updated, real_interfaces, max_bandwidth, polling_times
+    global manual_max_bandwidth, min_dynamic_maxbw # Add globals here
     
     previous_data, interface_names, interface_names_last_updated, real_interfaces, max_bandwidth = load_stored_data()
+    load_manual_max_bandwidth() # Load manual settings after config is read
     
-    poll_bw_interval = int(config['General'].get('poll_bw_every', 10))
+    poll_bw_interval = int(config['Bandwidth'].get('poll_every', 10))
 
     if daemon_mode:
         log_message(f"Running in daemon mode. Polling bandwidth every {poll_bw_interval} seconds.")
