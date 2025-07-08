@@ -98,10 +98,22 @@ def get_status_color(status, loss):
     status_lower = status.lower()
     if 'offline' in status_lower:
         return 'table-danger', '❌', 2
-    elif 'packetloss' in status_lower or loss != '0.0%':
-        return 'table-warning', '⚠️', 1
-    else:
-        return 'table-success', '✅', 0
+    
+    # Parse packet loss percentage to determine color threshold
+    try:
+        # Remove '%' and convert to float for comparison
+        loss_value = float(loss.strip('%'))
+        # Show yellow warning only when packet loss is greater than 2.0%
+        if loss_value > 2.0:
+            return 'table-warning', '⚠️', 1
+        else:
+            return 'table-success', '✅', 0
+    except (ValueError, AttributeError):
+        # If we can't parse the loss value, fall back to original logic
+        if 'packetloss' in status_lower or loss != '0.0%':
+            return 'table-warning', '⚠️', 1
+        else:
+            return 'table-success', '✅', 0
 
 
 def get_gateway_status(session, pfsense_config):
@@ -167,7 +179,7 @@ def parse_gateway_status(html_content):
     for row in rows:
         cols = row.find_all('td')
         if len(cols) >= 6:
-            name = list(cols[1].descendants)[0].string
+            name = list(cols[1].descendants)[0].string.strip()
             loss = cols[4].text.strip()
             status = cols[5].text.strip()
 
@@ -232,6 +244,16 @@ def main(daemon_mode=False):
             if not gateways:
                 log_message(f"No gateways found in the parsed content for {pfsense_config['name']}")
             else:
+                # Filter out ignored gateways
+                ignore_names = config['General'].get('ignore_names', '')
+                if ignore_names:
+                    ignored_list = [name.strip() for name in ignore_names.split(',')]
+                    original_count = len(gateways)
+                    gateways = [gw for gw in gateways if gw['name'] not in ignored_list]
+                    filtered_count = original_count - len(gateways)
+                    if filtered_count > 0:
+                        log_message(f"Filtered out {filtered_count} ignored gateway(s) for {pfsense_config['name']}")
+                
                 all_gateways[pfsense_config['name']] = gateways
                 log_message(f"Successfully retrieved {len(gateways)} gateways for {pfsense_config['name']}")
                 # Check for high packet loss and print to CLI

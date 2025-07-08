@@ -207,6 +207,6 @@
 
     document.addEventListener('DOMContentLoaded', function() {
         initializeScripts();
-        setInterval(reloadPage, 30000);
+        setInterval(reloadPage, 4500);
     });
 })();
