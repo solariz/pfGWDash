@@ -184,7 +184,7 @@ def parse_gateway_status(html_content):
             status = cols[5].text.strip()
 
             # Skip gateways with "Pending" status
-            if status.lower() == 'pending':
+            if status.lower() == 'pending' or cols[3].text.strip().lower() == 'pending':
                 continue
 
             color_class, status_symbol, status_order = get_status_color(status, loss)
