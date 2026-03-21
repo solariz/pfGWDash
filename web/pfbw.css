@@ -163,13 +163,24 @@ body {
     box-shadow: 0 6px 12px rgba(0, 0, 0, 0.3);
 }
 
+.interface-card-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: flex-start;
+    gap: 0.5rem;
+    margin-bottom: 0.5rem;
+    min-width: 0;
+}
+
 .interface-name {
     font-size: 1rem;
     font-weight: 600;
-    margin-bottom: 0.5rem;
+    margin-bottom: 0;
     color: var(--primary-color);
-    /* Ensure name doesn't overlap tag */
-    padding-right: 3rem; 
+    flex: 1;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
 }
 
 .bandwidth-item {
@@ -274,6 +285,28 @@ body {
     color: var(--text-secondary);
 }
 
+.footer-chart-legend {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.75rem 1rem;
+}
+
+.footer-smooth-chart {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    cursor: pointer;
+    user-select: none;
+}
+
+.footer-smooth-chart input {
+    margin: 0;
+    cursor: pointer;
+}
+
 /* Stale Data Alert */
 #stale-data-alert {
     display: none;
@@ -334,6 +367,10 @@ body {
     .interface-card {
         padding: 1rem;
     }
+    .interface-card-header {
+        margin-bottom: 0.5rem;
+    }
+
     .interface-name {
         font-size: 1.1rem;
     }
@@ -438,9 +475,8 @@ canvas.history-chart {
 
 /* Firewall Tag */
 .firewall-tag {
-    position: absolute;
-    top: 0.5rem;
-    right: 0.5rem;
+    flex-shrink: 0;
+    margin-top: 0.1rem;
     font-size: 0.65rem; /* Smaller */
     font-weight: 600;
     padding: 0.15rem 0.4rem;

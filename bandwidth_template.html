@@ -58,8 +58,10 @@
                     {% if interface_id in bandwidth_data %}
                         {% set data = bandwidth_data[interface_id] %}
                         <div class="interface-card" data-interface="{{ data.display_name }}">
-                            <div class="interface-name">{{ data.display_name }}</div>
-                            <span class="firewall-tag" data-fw="{{ fw_number }}">FW{{ fw_number }}</span>
+                            <div class="interface-card-header">
+                                <div class="interface-name">{{ data.display_name }}</div>
+                                <span class="firewall-tag" data-fw="{{ fw_number }}">FW{{ fw_number }}</span>
+                            </div>
                             
                             {% if data.status is defined and data.status != 'ok' %}
                                 {# --- Status Display --- #}
@@ -163,6 +165,10 @@
                     <div class="legend-color"></div>
                     <div>Out</div>
                 </div>
+                <label class="footer-smooth-chart">
+                    <input type="checkbox" id="smooth-history-chart" />
+                    Smooth graph
+                </label>
             </div>
             
             <!-- The live update status dot will be added here by JS -->
