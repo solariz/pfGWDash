@@ -4,6 +4,9 @@ let preventZeroUpdates = true;
 // Add a global debug flag that will be set from the data attribute in the HTML template
 let DEBUG_ENABLED = false;
 
+/** Visible history window in seconds (must match server HISTORY_RETENTION_PERIOD) */
+const HISTORY_RETENTION_WINDOW_SEC = 300;
+
 /** requestAnimationFrame id for continuous history chart redraw */
 let historyChartRafId = null;
 
@@ -250,6 +253,53 @@ function removeLegacyHistoryAxisLabels() {
 }
 
 /**
+ * Fixed Y-axis ceiling from history payload (BandwidthMax per interface), or null for dynamic
+ * @param {string} interfaceName
+ * @return {number|null}
+ */
+function getFixedScaleMaxForInterface(interfaceName) {
+    const hist = typeof initialBandwidthHistory !== 'undefined' ? initialBandwidthHistory : null;
+    const iface = hist && hist.interfaces ? hist.interfaces[interfaceName] : null;
+    if (!iface || typeof iface.scale_max !== 'number' || !isFinite(iface.scale_max) || iface.scale_max <= 0) {
+        return null;
+    }
+    return iface.scale_max;
+}
+
+/**
+ * Resolves Y-axis max: fixed only when interface has explicit BandwidthMax scale_max,
+ * otherwise data-driven dynamic scaling (min_maxbw is for bars, not charts)
+ * @param {string} interfaceName
+ * @param {{axisMaxSmoothed?: number}|undefined} anim
+ * @param {number} dataPeak - Peak Mbps in visible series (before headroom)
+ * @return {number}
+ */
+function resolveHistoryAxisMax(interfaceName, anim, dataPeak) {
+    const fixed = getFixedScaleMaxForInterface(interfaceName);
+    if (fixed !== null) {
+        if (anim) anim.axisMaxSmoothed = fixed;
+        return fixed;
+    }
+    const target = Math.max(0.1, dataPeak) * 1.2;
+    return getSmoothedAxisMaxForInterface(anim, target);
+}
+
+/**
+ * Chart right-edge time from last sample + local elapsed (avoids client/server clock skew)
+ * @param {{lastSampleUnixSec?: number, lastPayloadApplyPerfMs?: number}|undefined} anim
+ * @param {number} sampleIntervalSec
+ * @return {number} unix seconds
+ */
+function getChartNowSec(anim, sampleIntervalSec) {
+    if (anim && typeof anim.lastSampleUnixSec === 'number' && typeof anim.lastPayloadApplyPerfMs === 'number') {
+        const elapsedSec = (performance.now() - anim.lastPayloadApplyPerfMs) / 1000;
+        const capped = Math.min(Math.max(0, elapsedSec), Math.max(sampleIntervalSec, 1) * 1.25);
+        return anim.lastSampleUnixSec + capped;
+    }
+    return Date.now() / 1000;
+}
+
+/**
  * Updates per-series blend state after a new history payload from the server
  * @param {*} historyData
  */
@@ -272,11 +322,16 @@ function syncHistoryChartAnimationOnNewPayload(historyData) {
                 lastSampleUnixSec: tLatest,
                 lastPayloadApplyPerfMs: nowMs
             };
-        } else {
-            entry.in = advanceSeriesAnimState(entry.in, inV, nowMs);
-            entry.out = advanceSeriesAnimState(entry.out, outV, nowMs);
-            entry.lastSampleUnixSec = tLatest;
+            return;
         }
+        // Ignore duplicate/stale payloads with the same sample timestamp (keeps scroll timebase stable)
+        if (entry.lastSampleUnixSec === tLatest) {
+            return;
+        }
+        entry.in = advanceSeriesAnimState(entry.in, inV, nowMs);
+        entry.out = advanceSeriesAnimState(entry.out, outV, nowMs);
+        entry.lastSampleUnixSec = tLatest;
+        entry.lastPayloadApplyPerfMs = nowMs;
     });
 }
 
@@ -339,76 +394,150 @@ function refitAllInterfaceCardTitles() {
 }
 
 /**
+ * Collapses canvas points that share nearly the same X to avoid zero-length segments
+ * @param {Array<Array<number>>} points
+ * @return {Array<Array<number>>}
+ */
+function coalesceCanvasPoints(points) {
+    if (!points || points.length === 0) return [];
+    const out = [points[0]];
+    for (let i = 1; i < points.length; i++) {
+        const prev = out[out.length - 1];
+        const cur = points[i];
+        if (Math.abs(cur[0] - prev[0]) < 0.5) {
+            out[out.length - 1] = cur;
+        } else {
+            out.push(cur);
+        }
+    }
+    return out;
+}
+
+/**
  * Draws in or out series as a polyline with a horizontal tail to the chart right edge
  * @param {CanvasRenderingContext2D} ctx
  * @param {Array<Array<number>>} points - [x,y] canvas coords sorted by x ascending
  * @param {number} rightEdgeX
  */
 function drawSeriesWithTrailingEdge(ctx, points, rightEdgeX) {
-    if (!points || points.length === 0) return;
+    const pts = coalesceCanvasPoints(points);
+    if (pts.length === 0) return;
     ctx.beginPath();
-    ctx.moveTo(points[0][0], points[0][1]);
-    for (let i = 1; i < points.length; i++) {
-        ctx.lineTo(points[i][0], points[i][1]);
+    ctx.moveTo(pts[0][0], pts[0][1]);
+    for (let i = 1; i < pts.length; i++) {
+        ctx.lineTo(pts[i][0], pts[i][1]);
     }
-    const last = points[points.length - 1];
-    ctx.lineTo(rightEdgeX, last[1]);
+    const last = pts[pts.length - 1];
+    if (rightEdgeX > last[0] + 0.5) {
+        ctx.lineTo(rightEdgeX, last[1]);
+    }
     ctx.stroke();
 }
 
 /**
- * Catmull-Rom style smooth stroke through points, then horizontal tail to the right edge
+ * Monotone cubic Hermite stroke (no overshoot), then horizontal tail to the right edge.
+ * Avoids Catmull-Rom self-intersections that look like double lines on sharp spikes.
  * @param {CanvasRenderingContext2D} ctx
  * @param {Array<Array<number>>} points - [x,y] sorted by x ascending
  * @param {number} rightEdgeX
  */
 function drawSeriesSplineWithTrailingEdge(ctx, points, rightEdgeX) {
-    if (!points || points.length === 0) return;
+    const pts = coalesceCanvasPoints(points);
+    if (pts.length === 0) return;
     ctx.beginPath();
-    ctx.moveTo(points[0][0], points[0][1]);
-    if (points.length === 1) {
-        ctx.lineTo(rightEdgeX, points[0][1]);
+    ctx.moveTo(pts[0][0], pts[0][1]);
+    if (pts.length === 1) {
+        if (rightEdgeX > pts[0][0] + 0.5) ctx.lineTo(rightEdgeX, pts[0][1]);
         ctx.stroke();
         return;
     }
-    for (let i = 0; i < points.length - 1; i++) {
-        const p0 = points[Math.max(0, i - 1)];
-        const p1 = points[i];
-        const p2 = points[i + 1];
-        const p3 = points[Math.min(points.length - 1, i + 2)];
-        const cp1x = p1[0] + (p2[0] - p0[0]) / 6;
-        const cp1y = p1[1] + (p2[1] - p0[1]) / 6;
-        const cp2x = p2[0] - (p3[0] - p1[0]) / 6;
-        const cp2y = p2[1] - (p3[1] - p1[1]) / 6;
-        ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, p2[0], p2[1]);
+
+    const n = pts.length;
+    const dx = new Array(n - 1);
+    const dy = new Array(n - 1);
+    const m = new Array(n - 1);
+    for (let i = 0; i < n - 1; i++) {
+        dx[i] = pts[i + 1][0] - pts[i][0];
+        dy[i] = pts[i + 1][1] - pts[i][1];
+        m[i] = dx[i] !== 0 ? dy[i] / dx[i] : 0;
     }
-    const last = points[points.length - 1];
-    ctx.lineTo(rightEdgeX, last[1]);
+
+    const t = new Array(n);
+    t[0] = m[0];
+    t[n - 1] = m[n - 2];
+    for (let i = 1; i < n - 1; i++) {
+        t[i] = (m[i - 1] * m[i] <= 0) ? 0 : (m[i - 1] + m[i]) / 2;
+    }
+
+    for (let i = 0; i < n - 1; i++) {
+        if (Math.abs(m[i]) < 1e-12) {
+            t[i] = 0;
+            t[i + 1] = 0;
+            continue;
+        }
+        const a = t[i] / m[i];
+        const b = t[i + 1] / m[i];
+        const s = a * a + b * b;
+        if (s > 9) {
+            const h = 3 / Math.sqrt(s);
+            t[i] = h * a * m[i];
+            t[i + 1] = h * b * m[i];
+        }
+    }
+
+    for (let i = 0; i < n - 1; i++) {
+        const p0 = pts[i];
+        const p1 = pts[i + 1];
+        const h = dx[i];
+        if (h <= 0) {
+            ctx.lineTo(p1[0], p1[1]);
+            continue;
+        }
+        ctx.bezierCurveTo(
+            p0[0] + h / 3,
+            p0[1] + t[i] * h / 3,
+            p1[0] - h / 3,
+            p1[1] - t[i + 1] * h / 3,
+            p1[0],
+            p1[1]
+        );
+    }
+
+    const last = pts[n - 1];
+    if (rightEdgeX > last[0] + 0.5) {
+        ctx.lineTo(rightEdgeX, last[1]);
+    }
     ctx.stroke();
 }
 
 /**
- * Whether Catmull-Rom spline stroke is used for history lines (persisted)
+ * Whether monotone smooth stroke is used for history lines (default ON)
  * @return {boolean}
  */
 function isSmoothHistoryChartStrokeEnabled() {
     try {
-        return localStorage.getItem('pfbw_smooth_history') === '1';
+        const v = localStorage.getItem('pfbw_smooth_history');
+        if (v === null) return true;
+        return v !== '0';
     } catch (e) {
-        return false;
+        return true;
     }
 }
 
 /**
- * Binds footer checkbox to smooth-history localStorage and restores saved value
+ * Binds footer checkbox to smooth-history localStorage and restores saved value (default on)
  */
 function setupSmoothHistoryChartToggle() {
     const cb = document.getElementById('smooth-history-chart');
     if (!cb) return;
     try {
-        cb.checked = localStorage.getItem('pfbw_smooth_history') === '1';
+        const v = localStorage.getItem('pfbw_smooth_history');
+        cb.checked = v === null ? true : v !== '0';
+        if (v === null) {
+            localStorage.setItem('pfbw_smooth_history', '1');
+        }
     } catch (e) {
-        cb.checked = false;
+        cb.checked = true;
     }
     cb.addEventListener('change', () => {
         try {
@@ -437,26 +566,53 @@ function setupSmoothHistoryChartToggle() {
  */
 function mapHistorySeriesToCanvasPoints(series, maxT, displayV, nowSec, windowSec, pixelsPerSample, sampleIntervalSec, rightChartX, maxValueDraw, chartTop, chartHeight) {
     const cutoff = nowSec - windowSec;
-    const raw = [];
+    const byTs = {};
     for (let i = 0; i < series.length; i++) {
         const p = series[i];
         if (!p || p.length < 2) continue;
         const t = p[0];
-        if (typeof t !== 'number' || t < cutoff) continue;
+        if (typeof t !== 'number' || !isFinite(t) || t < cutoff) continue;
         let v = p[1];
         if (maxT !== null && t === maxT) v = displayV;
         if (typeof v !== 'number' || isNaN(v) || v < 0) continue;
-        raw.push({ t, v });
+        byTs[t] = { t, v };
     }
-    raw.sort((a, b) => a.t - b.t);
+    const raw = Object.keys(byTs).map(k => byTs[k]).sort((a, b) => a.t - b.t);
+    const safeInterval = sampleIntervalSec > 0 ? sampleIntervalSec : 1;
     const pts = [];
     for (let j = 0; j < raw.length; j++) {
-        const x = rightChartX - (nowSec - raw[j].t) / sampleIntervalSec * pixelsPerSample;
+        const x = rightChartX - (nowSec - raw[j].t) / safeInterval * pixelsPerSample;
+        if (!isFinite(x)) continue;
         const yRatio = maxValueDraw > 0 ? Math.min(raw[j].v / maxValueDraw, 1) : 0;
         const y = chartTop + chartHeight * (1 - yRatio);
+        if (!isFinite(y)) continue;
         pts.push([x, y]);
     }
     return pts;
+}
+
+/**
+ * Sizes a canvas for the current CSS box and device pixel ratio
+ * @param {HTMLCanvasElement} canvas
+ * @return {{ctx: CanvasRenderingContext2D, width: number, height: number}|null}
+ */
+function prepareHistoryChartCanvas(canvas) {
+    const cssW = Math.max(0, Math.round(canvas.clientWidth || canvas.offsetWidth));
+    const cssH = Math.max(0, Math.round(canvas.clientHeight || canvas.offsetHeight));
+    if (cssW <= 0 || cssH <= 0) return null;
+
+    const dpr = Math.max(1, Math.min(window.devicePixelRatio || 1, 2));
+    const pixelW = Math.round(cssW * dpr);
+    const pixelH = Math.round(cssH * dpr);
+    if (canvas.width !== pixelW || canvas.height !== pixelH) {
+        canvas.width = pixelW;
+        canvas.height = pixelH;
+    }
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    return { ctx, width: cssW, height: cssH };
 }
 
 /**
@@ -470,16 +626,9 @@ function drawHistoryChartInterface(interfaceName) {
     const interfaceData = initialBandwidthHistory.interfaces[interfaceName];
     if (!interfaceData || !interfaceData.in || !interfaceData.out) return;
 
-    const w = Math.max(0, Math.round(canvas.offsetWidth));
-    const h = Math.max(0, Math.round(canvas.offsetHeight));
-    if (w <= 0 || h <= 0) return;
-    if (canvas.width !== w || canvas.height !== h) {
-        canvas.width = w;
-        canvas.height = h;
-    }
-
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
+    const prepared = prepareHistoryChartCanvas(canvas);
+    if (!prepared) return;
+    const { ctx, width: cssW, height: cssH } = prepared;
 
     seedHistoryChartAnimationIfNeeded(initialBandwidthHistory);
     const anim = historyChartAnimationByInterface[interfaceName];
@@ -492,19 +641,20 @@ function drawHistoryChartInterface(interfaceName) {
     const maxTIn = latestIn ? latestIn[0] : null;
     const maxTOut = latestOut ? latestOut[0] : null;
 
-    let maxValue = 0.1;
+    let dataPeak = 0.1;
     const bumpMax = (series, maxT, displayV) => {
-        series.forEach(p => {
-            if (!p || p.length < 2) return;
+        for (let i = 0; i < series.length; i++) {
+            const p = series[i];
+            if (!p || p.length < 2) continue;
             let v = p[1];
             if (maxT !== null && p[0] === maxT) v = displayV;
-            if (typeof v === 'number' && !isNaN(v) && v >= 0) maxValue = Math.max(maxValue, v);
-        });
+            if (typeof v === 'number' && !isNaN(v) && v >= 0) dataPeak = Math.max(dataPeak, v);
+        }
     };
     bumpMax(interfaceData.in, maxTIn, displayIn);
     bumpMax(interfaceData.out, maxTOut, displayOut);
-    maxValue *= 1.2;
-    const maxValueDraw = getSmoothedAxisMaxForInterface(anim, maxValue);
+    const maxValueDraw = resolveHistoryAxisMax(interfaceName, anim, dataPeak);
+    if (!(maxValueDraw > 0)) return;
 
     const isDarkMode = document.documentElement.getAttribute('data-theme') === 'dark';
     const bgColor = isDarkMode ? '#1e1e1e' : '#ffffff';
@@ -514,14 +664,15 @@ function drawHistoryChartInterface(interfaceName) {
     const labelColor = getComputedStyle(document.documentElement).getPropertyValue('--chart-label-color').trim() || '#666';
 
     const padding = { top: 10, right: 12, bottom: 22, left: 36 };
-    const chartWidth = canvas.width - padding.left - padding.right;
-    const chartHeight = canvas.height - padding.top - padding.bottom;
+    const chartWidth = cssW - padding.left - padding.right;
+    const chartHeight = cssH - padding.top - padding.bottom;
     if (chartWidth <= 0 || chartHeight <= 0) return;
 
     const rightChartX = padding.left + chartWidth;
 
+    ctx.clearRect(0, 0, cssW, cssH);
     ctx.fillStyle = bgColor;
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillRect(0, 0, cssW, cssH);
 
     ctx.strokeStyle = gridColor;
     ctx.lineWidth = 1;
@@ -540,20 +691,24 @@ function drawHistoryChartInterface(interfaceName) {
     }
 
     let oldestTimestamp = Infinity;
-    interfaceData.in.forEach(p => { if (p && p.length >= 1) oldestTimestamp = Math.min(oldestTimestamp, p[0]); });
-    interfaceData.out.forEach(p => { if (p && p.length >= 1) oldestTimestamp = Math.min(oldestTimestamp, p[0]); });
+    for (let i = 0; i < interfaceData.in.length; i++) {
+        const p = interfaceData.in[i];
+        if (p && typeof p[0] === 'number') oldestTimestamp = Math.min(oldestTimestamp, p[0]);
+    }
+    for (let i = 0; i < interfaceData.out.length; i++) {
+        const p = interfaceData.out[i];
+        if (p && typeof p[0] === 'number') oldestTimestamp = Math.min(oldestTimestamp, p[0]);
+    }
     if (!isFinite(oldestTimestamp)) {
         oldestTimestamp = Math.floor(Date.now() / 1000);
     }
 
     const tLatest = Math.max(maxTIn != null ? maxTIn : 0, maxTOut != null ? maxTOut : 0);
     const sampleIntervalSec = getHistorySampleIntervalSec(initialBandwidthHistory);
-    // nowSec is the right-edge anchor: "now" in wall-clock unix seconds.
-    // Every rAF frame this advances, causing all points to drift left continuously.
-    const nowSec = Date.now() / 1000;
+    const nowSec = getChartNowSec(anim, sampleIntervalSec);
 
-    const windowSec = Math.min(Math.max(tLatest - oldestTimestamp, sampleIntervalSec), 3600);
-    // pixels per sampleIntervalSec of time: chartWidth / (windowSec / sampleIntervalSec)
+    const spanSec = Math.max(tLatest > 0 ? (nowSec - oldestTimestamp) : sampleIntervalSec, sampleIntervalSec);
+    const windowSec = Math.min(spanSec, HISTORY_RETENTION_WINDOW_SEC);
     const pixelsPerSample = chartWidth * sampleIntervalSec / windowSec;
 
     const xGridLines = 2;
@@ -581,9 +736,8 @@ function drawHistoryChartInterface(interfaceName) {
     ctx.textBaseline = 'top';
     for (let i = 0; i <= xGridLines; i++) {
         const x = padding.left + chartWidth * (i / xGridLines);
-        // i=0 → left edge = oldest (nowSec - windowSec), i=xGridLines → right edge = nowSec
         const timestamp = nowSec - windowSec * (1 - i / xGridLines);
-        ctx.fillText(formatTime(timestamp), x, canvas.height - 18);
+        ctx.fillText(formatTime(timestamp), x, cssH - 18);
     }
 
     const chartTop = padding.top;
@@ -597,6 +751,8 @@ function drawHistoryChartInterface(interfaceName) {
     const strokeSeries = isSmoothHistoryChartStrokeEnabled() ? drawSeriesSplineWithTrailingEdge : drawSeriesWithTrailingEdge;
 
     ctx.lineWidth = 2;
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
     if (inPoints.length > 0) {
         ctx.strokeStyle = inColor;
         strokeSeries(ctx, inPoints, rightChartX);
@@ -624,6 +780,9 @@ function drawAllHistoryChartsFrame() {
  */
 function historyChartAnimationFrame() {
     historyChartRafId = null;
+    if (document.hidden) {
+        return;
+    }
     if (document.querySelector('.history-chart')) {
         drawAllHistoryChartsFrame();
     }
@@ -635,7 +794,24 @@ function historyChartAnimationFrame() {
  */
 function startHistoryChartAnimationLoop() {
     if (historyChartRafId !== null) return;
+    if (document.hidden) return;
     historyChartRafId = requestAnimationFrame(historyChartAnimationFrame);
+}
+
+/**
+ * Pauses chart rAF while the tab is hidden; resumes on visibility
+ */
+function setupHistoryChartVisibilityHandling() {
+    document.addEventListener('visibilitychange', () => {
+        if (document.hidden) {
+            if (historyChartRafId !== null) {
+                cancelAnimationFrame(historyChartRafId);
+                historyChartRafId = null;
+            }
+            return;
+        }
+        startHistoryChartAnimationLoop();
+    });
 }
 
 /**
@@ -661,19 +837,14 @@ function getNiceAxisValues(maxValue, divisions) {
 
     for (let i = 0; i <= actualDivisions; i++) {
         const value = i * stepSize;
-        if (value <= maxValue * 1.01) { // Add slight buffer
+        if (value <= maxValue * 1.01) {
             values.push(value);
         } else {
             break;
         }
     }
-    
-    // Ensure max value is covered if steps don't quite reach it
-    if (values.length === 0 || values[values.length - 1] < maxValue) {
-       // values.push(maxValue); // Avoid pushing exact max if step is close
-    }
-    if (values.length === 0) values.push(0.1); // Avoid empty axis
 
+    if (values.length === 0) values.push(0.1);
     return values;
 }
 
@@ -1220,6 +1391,7 @@ document.addEventListener('DOMContentLoaded', () => {
             updateBandwidthBars(); // Initial animation for bars
             setupHistoryToggles(); // Initialize chart canvases
             setupSmoothHistoryChartToggle();
+            setupHistoryChartVisibilityHandling();
             refitAllInterfaceCardTitles();
             setupInterfaceTitleResizeObservers();
             setTimeout(() => {
@@ -1227,6 +1399,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }, 150); // Slightly increased delay for chart draw after bars
         } else {
             debugLog("Initial state is 'No Data', skipping initial UI updates.");
+            setupHistoryChartVisibilityHandling();
         }
 
         // Always start the AJAX updater
@@ -1288,15 +1461,16 @@ function updateBandwidthBarAJAX(card, direction, value, maxBandwidth) {
     // }
     
     bar.dataset.value = value.toString();
-    
+
     const maxKey = `${displayName}-${direction}`;
     let maxValue = parseFloat(bar.dataset.max || '1');
-    if (maxBandwidth && maxBandwidth[maxKey] && maxBandwidth[maxKey] > maxValue) {
+    if (maxBandwidth && typeof maxBandwidth[maxKey] === 'number' && maxBandwidth[maxKey] > 0) {
         maxValue = maxBandwidth[maxKey];
         bar.dataset.max = maxValue.toString();
-        debugLog(`DEBUG: Updated max for ${displayName} ${direction} to ${maxValue}`);
+        debugLog(`DEBUG: Synced max for ${displayName} ${direction} to ${maxValue}`);
     }
-    let percentage = maxValue > 0 ? Math.min((value / maxValue) * 100, 100) : 0;
+    if (!isFinite(maxValue) || maxValue <= 0) maxValue = 1;
+    let percentage = Math.min((value / maxValue) * 100, 100);
 
     // Calculate new styles
     const newWidth = (value < 0.005) ? '0%' : `${percentage}%`;
