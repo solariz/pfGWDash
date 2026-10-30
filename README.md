@@ -126,7 +126,14 @@ auth_file = auth.json
 expiry_hours = 1
 
 [Gateways]
+# Widget key of the Gateways widget on the pfSense dashboard.
+# Use the key itself ("gateways-0"), not the DOM panel id
+# ("widget-gateways-0_panel-body").
+# The key must exist on the dashboard of the account used to poll
+# so log in once with that account and add a Gateways widget.
 widget_key = gateways-0
+# Comma-separated gateway names to hide entirely (e.g. WAN4_GW,WAN5_GW)
+ignore_gateway_by_name = WAN4_GW,WAN5_GW
 
 [Bandwidth]
 # Interfaces to monitor (comma-separated)
@@ -155,11 +162,22 @@ opt3 = 500
 | `PfSense_*` | `password` | pfSense password |
 | `Session` | `auth_file` | Local file to cache session tokens |
 | `Session` | `expiry_hours` | Session cache lifetime in hours |
-| `Gateways` | `widget_key` | pfSense dashboard widget identifier |
+| `Gateways` | `widget_key` | pfSense dashboard widget key (e.g. `gateways-0`) |
+| `Gateways` | `ignore_gateway_by_name` | Comma-separated gateway names to hide entirely |
 | `Bandwidth` | `interfaces` | Comma-separated list of interfaces to monitor |
 | `Bandwidth` | `poll_every` | Bandwidth polling interval in seconds |
 | `BandwidthMax` | `min_maxbw` | Base value for dynamic graph scaling (Mbps) |
 | `BandwidthMax` | `<interface>` | Optional fixed max bandwidth per interface (Mbps) |
+
+> **Gateways widget key:** `widget_key` is the key pfSense uses for the widget
+> instance (e.g. `gateways-0`), **not** the HTML panel id
+> (`widget-gateways-0_panel-body`). It must also exist on the dashboard of the
+> account used for polling, otherwise pfSense replies `Invalid Widget Key` and
+> no gateway data is returned.
+>
+> **Ignoring gateways:** `ignore_gateway_by_name` takes a comma-separated list of
+> gateway names (e.g. `WAN4_GW,WAN5_GW`). Matching gateways are removed from the
+> output entirely and are not reported in the packet-loss checks.
 
 You can add as many `[PfSense_*]` sections as needed. Each must have a unique section name.
 

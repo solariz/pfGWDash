@@ -11,6 +11,11 @@
     let isReloading = false;
     let dataTable;
 
+    function parseTimestamp(value) {
+        if (!value) return NaN;
+        return new Date(value.trim().replace(' ', 'T')).getTime();
+    }
+
     function reloadPage() {
         if (isReloading) return;
         isReloading = true;
@@ -20,10 +25,10 @@
             .then(html => {
                 const parser = new DOMParser();
                 const newDoc = parser.parseFromString(html, 'text/html');
-                const newLastUpdated = newDoc.querySelector('p.text-center.mt-4').textContent;
-                const newLastUpdateTime = new Date(newLastUpdated.split(': ')[1]).getTime();
+                const newLastUpdated = newDoc.querySelector('#lastUpdated');
+                const newLastUpdateTime = newLastUpdated ? parseTimestamp(newLastUpdated.textContent) : NaN;
 
-                if (newLastUpdateTime > lastUpdateTime) {
+                if (Number.isFinite(newLastUpdateTime) && newLastUpdateTime > lastUpdateTime) {
                     updateTableContent(newDoc);
                     lastUpdateTime = newLastUpdateTime;
                     lastSuccessfulUpdateTime = new Date().getTime();
@@ -66,15 +71,15 @@
         }
 
         // Update last updated text
-        const lastUpdatedElement = document.querySelector('p.text-center.mt-4');
-        const newLastUpdatedElement = newDoc.querySelector('p.text-center.mt-4');
+        const lastUpdatedElement = document.querySelector('#lastUpdated');
+        const newLastUpdatedElement = newDoc.querySelector('#lastUpdated');
         if (lastUpdatedElement && newLastUpdatedElement) {
             lastUpdatedElement.textContent = newLastUpdatedElement.textContent;
         }
 
         // Update polling times table
-        const currentPollingTable = document.querySelector('.mt-4 table');
-        const newPollingTable = newDoc.querySelector('.mt-4 table');
+        const currentPollingTable = document.querySelector('#pollingTable');
+        const newPollingTable = newDoc.querySelector('#pollingTable');
         if (currentPollingTable && newPollingTable) {
             currentPollingTable.innerHTML = newPollingTable.innerHTML;
         }
@@ -89,11 +94,21 @@
     }
 
     function statusSortingFunction(data) {
-        return data === '✅' ? 1 : 0;
+        return String(data).includes('✅') ? 1 : 0;
     }
 
     function initializeDataTable() {
         dataTable = $('#gatewayTable').DataTable({
+            "dom": '<"table-scroll"t><"dt-footer"<"dt-footer-left"lf><"dt-footer-right"ip>>',
+            "language": {
+                "lengthMenu": "Show _MENU_",
+                "search": "Search:",
+                "searchPlaceholder": "Filter gateways...",
+                "info": "Showing _START_ - _END_ of _TOTAL_",
+                "infoEmpty": "No gateways",
+                "infoFiltered": "(filtered from _MAX_)",
+                "zeroRecords": "No matching gateways"
+            },
             "order": [],
             "pageLength": 15,
             "lengthMenu": [[10, 15, 40, -1], [10, 15, 40, "All"]],
@@ -130,7 +145,13 @@
             ],
             "drawCallback": function(settings) {
                 // Remove sort indicators from the Status column
-                $('.status-column').removeClass('sorting sorting_asc sorting_desc');
+                $(settings.nTableWrapper).find('.status-column').removeClass('sorting sorting_asc sorting_desc');
+
+                // Hide the pager when all rows fit on a single page
+                if (settings.api) {
+                    const pageInfo = settings.api.page.info();
+                    $(settings.nTableWrapper).find('.dataTables_paginate').toggle(pageInfo.pages > 1);
+                }
             }
         });
     }
@@ -140,11 +161,11 @@
         initializeDataTable();
         applyCustomStyling();
 
-        const lastUpdatedElement = document.querySelector('p.text-center.mt-4');
+        const lastUpdatedElement = document.querySelector('#lastUpdated');
         if (lastUpdatedElement) {
-            const lastUpdatedTime = new Date(lastUpdatedElement.textContent.split(': ')[1]).getTime();
-            lastUpdateTime = lastUpdatedTime;
-            lastSuccessfulUpdateTime = lastUpdatedTime;
+            const lastUpdatedTime = parseTimestamp(lastUpdatedElement.textContent);
+            lastUpdateTime = Number.isFinite(lastUpdatedTime) ? lastUpdatedTime : Date.now();
+            lastSuccessfulUpdateTime = lastUpdateTime;
             checkLastUpdateTime();
         }
     }
@@ -179,29 +200,18 @@
     function checkLastUpdateTime() {
         const currentTime = new Date().getTime();
         const timeSinceLastUpdate = currentTime - lastSuccessfulUpdateTime;
-        const lastUpdatedElement = document.querySelector('p.text-center.mt-4');
-        const headerElement = document.querySelector('h1.mb-4');
+        const lastUpdatedElement = document.querySelector('#lastUpdated');
+        const staleIndicator = document.querySelector('#staleIndicator');
 
-        if (timeSinceLastUpdate > 60000) { // 60000 ms = 1 minute
-            lastUpdatedElement.style.color = 'red';
-            if (!lastUpdatedElement.innerHTML.includes('⚠️')) {
-                lastUpdatedElement.innerHTML = '⚠️ ' + lastUpdatedElement.innerHTML;
-            }
+        if (!lastUpdatedElement) {
+            return;
+        }
 
-            if (!headerElement.querySelector('.warning-icon')) {
-                const warningSpan = document.createElement('span');
-                warningSpan.className = 'warning-icon';
-                warningSpan.innerHTML = '⚠️ <small style="font-size: 0.5em;">not refreshed</small> ';
-                headerElement.prepend(warningSpan);
-            }
-        } else {
-            lastUpdatedElement.style.color = '';
-            lastUpdatedElement.innerHTML = lastUpdatedElement.innerHTML.replace('⚠️ ', '');
+        const isStale = timeSinceLastUpdate > 60000; // 60000 ms = 1 minute
+        lastUpdatedElement.classList.toggle('is-stale', isStale);
 
-            const warningIcon = headerElement.querySelector('.warning-icon');
-            if (warningIcon) {
-                headerElement.removeChild(warningIcon);
-            }
+        if (staleIndicator) {
+            staleIndicator.hidden = !isStale;
         }
     }
 

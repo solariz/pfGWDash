@@ -116,6 +116,23 @@ def get_status_color(status, loss):
             return 'table-success', '✅', 0
 
 
+def get_ignored_gateway_names(config):
+    """
+    Return the set of gateway names that should be hidden entirely.
+
+    The names are read from the comma-separated `ignore_gateway_by_name`
+    option in the [Gateways] section, e.g. "WAN4_GW,WAN5_GW".
+
+    Args:
+        config (ConfigParser): Configuration object.
+
+    Returns:
+        set: Gateway names to exclude from the output.
+    """
+    raw_names = config['Gateways'].get('ignore_gateway_by_name', '')
+    return {name.strip() for name in raw_names.split(',') if name.strip()}
+
+
 def get_gateway_status(session, pfsense_config):
     """
     Retrieve gateway status from a pfSense using the pfsense integrated gateway.widget.php
@@ -152,11 +169,25 @@ def get_gateway_status(session, pfsense_config):
         'widgetkey': config['Gateways']['widget_key']
     }
 
+    widget_key = data['widgetkey']
     response = session.post(gateway_url, headers=headers, data=data, verify=False)
+    open('/tmp/gw_widget.html', 'w').write(response.text)
     print(f"Gateway status response code: {response.status_code}")
     if response.status_code != 200:
         print(f"Error content: {response.text[:500]}")
-    return response.text if response.status_code == 200 else None
+        return None
+
+    # pfSense rejects keys that are not an existing dashboard widget key.
+    if 'Invalid Widget Key' in response.text:
+        print(f"pfSense rejected widget key '{widget_key}'.")
+        print(
+            "Use the widget key itself (e.g. 'gateways-0'), not the panel body id "
+            "(e.g. 'widget-gateways-0_panel-body'). pfSense only accepts keys for "
+            "widgets placed on the dashboard of the account used to poll."
+        )
+        return None
+
+    return response.text
 
 
 def parse_gateway_status(html_content):
@@ -245,11 +276,10 @@ def main(daemon_mode=False):
                 log_message(f"No gateways found in the parsed content for {pfsense_config['name']}")
             else:
                 # Filter out ignored gateways
-                ignore_names = config['General'].get('ignore_names', '')
-                if ignore_names:
-                    ignored_list = [name.strip() for name in ignore_names.split(',')]
+                ignored_names = get_ignored_gateway_names(config)
+                if ignored_names:
                     original_count = len(gateways)
-                    gateways = [gw for gw in gateways if gw['name'] not in ignored_list]
+                    gateways = [gw for gw in gateways if gw['name'] not in ignored_names]
                     filtered_count = original_count - len(gateways)
                     if filtered_count > 0:
                         log_message(f"Filtered out {filtered_count} ignored gateway(s) for {pfsense_config['name']}")
